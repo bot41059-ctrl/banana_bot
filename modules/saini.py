@@ -21,6 +21,7 @@ from io import BytesIO
 from pathlib import Path  
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
+import json
 from base64 import b64decode
 import cp_helper
 
@@ -37,17 +38,44 @@ def find_binary(name: str) -> Optional[str]:
                 return os.path.abspath(p)
     return None
 
-def duration(filename):
+def get_video_info(filename: str):
+    """
+    Extracts accurate duration, width, and height using ffprobe.
+    Ensures video can be streamed and played directly inside Telegram.
+    """
+    info = {"duration": 0, "width": 1280, "height": 720}
     try:
-        result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
-                                 "format=duration", "-of",
-                                 "default=noprint_wrappers=1:nokey=1", filename],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True)
-        return float(result.stdout.strip())
-    except Exception:
-        return 0.0
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries",
+            "format=duration:stream=width,height,duration",
+            "-of", "json", filename
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+        if res.returncode == 0 and res.stdout:
+            data = json.loads(res.stdout)
+            format_info = data.get("format", {})
+            if "duration" in format_info:
+                try:
+                    info["duration"] = int(float(format_info["duration"]))
+                except (ValueError, TypeError):
+                    pass
+            for stream in data.get("streams", []):
+                if stream.get("width") and stream.get("height"):
+                    info["width"] = int(stream["width"])
+                    info["height"] = int(stream["height"])
+                    if not info["duration"] and stream.get("duration"):
+                        try:
+                            info["duration"] = int(float(stream["duration"]))
+                        except (ValueError, TypeError):
+                            pass
+                    break
+    except Exception as e:
+        print(f"ffprobe metadata extraction skipped: {e}")
+    return info
+
+def duration(filename):
+    info = get_video_info(filename)
+    return float(info.get("duration", 0))
 
 # ============================================================
 #  🔥 NEW: get_mps_and_keys with Widevine & Classplus API v56
@@ -354,8 +382,12 @@ def time_name():
 #  🔥 FIXED: download_video with URL parameter preservation
 # ============================================================
 async def download_video(url, cmd, name):
-    # Ensure URL is complete with all parameters (L1: key+userIds, L2: hdnts)
-    download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
+    # For ClassX and HLS m3u8 streams with custom headers, do not force aria2c as it may drop headers
+    if "classx" in url.lower() or ".m3u8" in url.lower() or "--concurrent-fragments" in cmd:
+        download_cmd = f'{cmd} -R 25 --fragment-retries 25'
+    else:
+        download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
+
     global failed_counter
     print(f"⬇️ Running: {download_cmd}")
     logging.info(download_cmd)
@@ -418,11 +450,17 @@ async def download_and_decrypt_video(url, cmd, name, key):
             return None  
 
 # ============================================================
-#  🔥 FIXED: send_vid with L1 support
+#  🔥 FIXED: send_vid with accurate duration & Telegram streaming
 # ============================================================
 async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, name, prog, channel_id):
-    subprocess.run(f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 "{filename}.jpg"', shell=True)
-    await prog.delete (True)
+    info = get_video_info(filename)
+    dur = info.get("duration", 0)
+    width = info.get("width", 1280)
+    height = info.get("height", 720)
+
+    thumb_time = "00:00:02" if dur >= 3 else "00:00:00"
+    subprocess.run(f'ffmpeg -y -i "{filename}" -ss {thumb_time} -vframes 1 "{filename}.jpg"', shell=True)
+    await prog.delete(True)
     reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{name}**</blockquote>")
     reply = await m.reply_text(f"**Generate Thumbnail:**\n<blockquote>**{name}**</blockquote>")
     try:
@@ -437,21 +475,47 @@ async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, n
             w_filename = f"w_{filename}"
             font_path = "vidwater.ttf"
             subprocess.run(
-                f'ffmpeg -i "{filename}" -vf "drawtext=fontfile={font_path}:text=\'{vidwatermark}\':fontcolor=white@0.3:fontsize=h/6:x=(w-text_w)/2:y=(h-text_h)/2" -codec:a copy "{w_filename}"',
+                f'ffmpeg -y -i "{filename}" -vf "drawtext=fontfile={font_path}:text=\'{vidwatermark}\':fontcolor=white@0.3:fontsize=h/6:x=(w-text_w)/2:y=(h-text_h)/2" -codec:a copy "{w_filename}"',
                 shell=True
             )
+            info = get_video_info(w_filename)
+            dur = info.get("duration", dur)
+            width = info.get("width", width)
+            height = info.get("height", height)
             
     except Exception as e:
         await m.reply_text(str(e))
+        w_filename = f"{filename}"
 
-    dur = int(duration(w_filename))
     start_time = time.time()
+    thumb_to_send = thumbnail if (thumbnail and os.path.exists(thumbnail) and os.path.getsize(thumbnail) > 0) else None
 
     try:
-        await bot.send_video(channel_id, w_filename, caption=cc, supports_streaming=True, height=720, width=1280, thumb=thumbnail, duration=dur, progress=progress_bar, progress_args=(reply, start_time))
-    except Exception:
+        await bot.send_video(
+            channel_id,
+            w_filename,
+            caption=cc,
+            supports_streaming=True,
+            height=height,
+            width=width,
+            thumb=thumb_to_send,
+            duration=dur,
+            progress=progress_bar,
+            progress_args=(reply, start_time)
+        )
+    except Exception as send_err:
+        print(f"send_video error: {send_err}, falling back to send_document")
         await bot.send_document(channel_id, w_filename, caption=cc, progress=progress_bar, progress_args=(reply, start_time))
-    os.remove(w_filename)
+
+    try:
+        if os.path.exists(w_filename):
+            os.remove(w_filename)
+    except Exception:
+        pass
     await reply.delete(True)
     await reply1.delete(True)
-    os.remove(f"{filename}.jpg")
+    try:
+        if os.path.exists(f"{filename}.jpg"):
+            os.remove(f"{filename}.jpg")
+    except Exception:
+        pass
