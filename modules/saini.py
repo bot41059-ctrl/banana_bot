@@ -10,131 +10,49 @@ import logging
 import requests
 import tgcrypto
 import subprocess
-import shutil
 import concurrent.futures
-from typing import Optional, List
 from math import ceil
 from utils import progress_bar
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from io import BytesIO
-from pathlib import Path  
+from pathlib import Path
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
-import json
 from base64 import b64decode
-import cp_helper
 
-def find_binary(name: str) -> Optional[str]:
-    w = shutil.which(name)
-    if w:
-        return w
-    base_dirs = ['.', '..', 'modules', 'Banana_bot--main', 'Banana_bot--main/modules', 'C:/muftukmall', '/usr/local/bin']
-    exts = ['', '.exe', '.EXE']
-    for b in base_dirs:
-        for ext in exts:
-            p = os.path.join(b, f"{name}{ext}")
-            if os.path.exists(p):
-                return os.path.abspath(p)
-    return None
-
-def get_video_info(filename: str):
-    """
-    Extracts accurate duration, width, and height using ffprobe.
-    Ensures video can be streamed and played directly inside Telegram.
-    """
-    info = {"duration": 0, "width": 1280, "height": 720}
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration:stream=width,height,duration",
-            "-of", "json", filename
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
-        if res.returncode == 0 and res.stdout:
-            data = json.loads(res.stdout)
-            format_info = data.get("format", {})
-            if "duration" in format_info:
-                try:
-                    info["duration"] = int(float(format_info["duration"]))
-                except (ValueError, TypeError):
-                    pass
-            for stream in data.get("streams", []):
-                if stream.get("width") and stream.get("height"):
-                    info["width"] = int(stream["width"])
-                    info["height"] = int(stream["height"])
-                    if not info["duration"] and stream.get("duration"):
-                        try:
-                            info["duration"] = int(float(stream["duration"]))
-                        except (ValueError, TypeError):
-                            pass
-                    break
-    except Exception as e:
-        print(f"ffprobe metadata extraction skipped: {e}")
-    return info
 
 def duration(filename):
-    info = get_video_info(filename)
-    return float(info.get("duration", 0))
+    result = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of",
+                             "default=noprint_wrappers=1:nokey=1", filename],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT)
+    return float(result.stdout)
 
-# ============================================================
-#  🔥 NEW: get_mps_and_keys with Widevine & Classplus API v56
-# ============================================================
-def get_mps_and_keys(api_url, lic_url=None):
-    """
-    Fetch MPD and keys from ClassPlus API / Widevine CDM.
-    Supports both direct MPD and Classplus content/streaming URLs.
-    """
-    try:
-        # If it's a direct MPD URL
-        if api_url.endswith('.mpd') or '/manifest' in api_url or '.mpd?' in api_url:
-            pssh = cp_helper.extract_pssh(api_url)
-            if pssh and lic_url:
-                keys = cp_helper.extract_widevine_keys(pssh, lic_url)
-                return api_url, keys
-            return api_url, []
 
-        # If it's a Classplus / Testbook URL
-        res = cp_helper.resolve_classplus(api_url)
-        if res.get("status") == "drm":
-            return res.get("url"), res.get("keys", [])
-        elif res.get("status") == "signed":
-            return res.get("url"), []
-        return api_url, []
-    except Exception as e:
-        print(f"Error in get_mps_and_keys: {e}")
-        return api_url, []
+def get_mps_and_keys(api_url):
+    response = requests.get(api_url)
+    response_json = response.json()
+    mpd = response_json.get('MPD')
+    keys = response_json.get('KEYS')
+    return mpd, keys
 
-def extract_keys_from_mpd(mpd_content, lic_url=None):
-    """Extract decryption keys from MPD content using Widevine CDM."""
-    try:
-        pssh_pattern = r'<pssh[^>]*>([^<]+)</pssh>|<cenc:pssh[^>]*>([^<]+)</cenc:pssh>'
-        pssh_matches = re.findall(pssh_pattern, mpd_content, re.IGNORECASE)
-        pssh_b64 = None
-        for m in pssh_matches:
-            cand = m[0] or m[1]
-            if cand:
-                pssh_b64 = cand.strip()
-                break
-        if pssh_b64 and lic_url:
-            return cp_helper.extract_widevine_keys(pssh_b64, lic_url)
-        return []
-    except Exception as e:
-        print(f"Error extracting keys: {e}")
-        return []
 
 def exec(cmd):
-        process = subprocess.run(cmd, stdout=subprocess.PIPE,stderr=subprocess.PIPE)
-        output = process.stdout.decode()
-        print(output)
-        return output
+    process = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output = process.stdout.decode()
+    print(output)
+    return output
+
 
 def pull_run(work, cmds):
     with concurrent.futures.ThreadPoolExecutor(max_workers=work) as executor:
         print("Waiting for tasks to complete")
-        fut = executor.map(exec,cmds)
-        
-async def aio(url,name):
+        fut = executor.map(exec, cmds)
+
+
+async def aio(url, name):
     k = f'{name}.pdf'
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -145,7 +63,7 @@ async def aio(url,name):
     return k
 
 
-async def download(url,name):
+async def download(url, name):
     ka = f'{name}.pdf'
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
@@ -167,7 +85,7 @@ def parse_vid_info(info):
             while "  " in i:
                 i = i.replace("  ", " ")
             i.strip()
-            i = i.split("|")[0].split(" ",2)
+            i = i.split("|")[0].split(" ", 2)
             try:
                 if "RESOLUTION" not in i[2] and i[2] not in temp and "audio" not in i[2]:
                     temp.append(i[2])
@@ -175,6 +93,7 @@ def parse_vid_info(info):
             except:
                 pass
     return new_info
+
 
 def vid_info(info):
     info = info.strip()
@@ -187,76 +106,94 @@ def vid_info(info):
             while "  " in i:
                 i = i.replace("  ", " ")
             i.strip()
-            i = i.split("|")[0].split(" ",3)
+            i = i.split("|")[0].split(" ", 3)
             try:
                 if "RESOLUTION" not in i[2] and i[2] not in temp and "audio" not in i[2]:
                     temp.append(i[2])
-                    new_info.update({f'{i[2]}':f'{i[0]}'})
+                    new_info.update({f'{i[2]}': f'{i[0]}'})
             except:
                 pass
     return new_info
 
-# ============================================================
-#  🔥 FIXED: decrypt_and_merge_video (N_m3u8DL-RE & mp4decrypt)
-# ============================================================
-async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720", keys_list=None):
+
+# ======================= FASTSTART SAFETY NET =======================
+async def ensure_faststart(filename):
+    """
+    Moov atom ko file ke shuru mein le aata hai (Telegram inline stream ke liye zaroori).
+    Agar codec H.264/AAC nahi hai toh convert bhi karta hai.
+    """
+    try:
+        if not filename or not os.path.exists(filename):
+            return filename
+        if not filename.lower().endswith((".mp4", ".mkv", ".webm", ".mov")):
+            return filename
+
+        # Video codec check
+        probe_v = subprocess.run(
+            f'ffprobe -v error -select_streams v:0 -show_entries stream=codec_name '
+            f'-of default=noprint_wrappers=1:nokey=1 "{filename}"',
+            shell=True, capture_output=True, text=True
+        )
+        vcodec = (probe_v.stdout or "").strip().lower()
+
+        # Audio codec check
+        probe_a = subprocess.run(
+            f'ffprobe -v error -select_streams a:0 -show_entries stream=codec_name '
+            f'-of default=noprint_wrappers=1:nokey=1 "{filename}"',
+            shell=True, capture_output=True, text=True
+        )
+        acodec = (probe_a.stdout or "").strip().lower()
+
+        print(f"[faststart] v={vcodec} a={acodec} file={filename}")
+
+        base, ext = os.path.splitext(filename)
+        fixed = f"{base}_fs.mp4"
+
+        if vcodec not in ("h264", "avc1") or acodec not in ("aac", "mp4a", ""):
+            # Re-encode — H.264 + AAC
+            print(f"[faststart] re-encoding → H.264 + AAC")
+            r = subprocess.run(
+                f'ffmpeg -y -i "{filename}" -c:v libx264 -preset veryfast -crf 23 '
+                f'-c:a aac -b:a 128k -movflags +faststart -max_muxing_queue_size 1024 "{fixed}"',
+                shell=True, capture_output=True
+            )
+        else:
+            # Sirf faststart remux (copy, super fast)
+            print(f"[faststart] remux only → +faststart")
+            r = subprocess.run(
+                f'ffmpeg -y -i "{filename}" -c copy -movflags +faststart '
+                f'-max_muxing_queue_size 1024 "{fixed}"',
+                shell=True, capture_output=True
+            )
+
+        if os.path.exists(fixed) and os.path.getsize(fixed) > 1024:
+            try:
+                os.remove(filename)
+            except Exception:
+                pass
+            os.replace(fixed, filename)
+            print(f"[faststart] ✅ done: {filename}")
+        else:
+            err = (r.stderr or b"").decode(errors="ignore")[-400:]
+            print(f"[faststart] ❌ ffmpeg failed: {err}")
+            if os.path.exists(fixed):
+                try:
+                    os.remove(fixed)
+                except Exception:
+                    pass
+        return filename
+    except Exception as e:
+        print(f"[faststart] exception: {e}")
+        return filename
+# =====================================================================
+
+
+async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name, quality="720"):
     try:
         output_path = Path(output_path)
         output_path.mkdir(parents=True, exist_ok=True)
 
-        # Parse keys_list if not passed explicitly
-        if not keys_list and keys_string:
-            keys_list = re.findall(r'([0-9a-fA-F]{32}:[0-9a-fA-F]{32})', keys_string)
-            if not keys_list:
-                keys_list = [k.strip() for k in keys_string.replace('--key', '').split() if ':' in k]
-
-        clean_keys = [k.strip() for k in (keys_list or []) if k and k.strip()]
-        keys_arg_str = " ".join([f"--key {k}" for k in clean_keys]) if clean_keys else keys_string
-
-        safe_name = "".join(c for c in output_name if c.isalnum() or c in (" ", "_", "-")).strip() or f"Video_{int(time.time())}"
-        safe_name = re.sub(r"\s+", "_", safe_name)
-
-        n_m3u8dl = find_binary("N_m3u8DL-RE")
-        ff_bin = find_binary("ffmpeg")
-
-        # -------------------------------------------------------------
-        # 1. Prefer N_m3u8DL-RE engine if available
-        # -------------------------------------------------------------
-        if n_m3u8dl:
-            print(f"🚀 Using N_m3u8DL-RE engine ({n_m3u8dl}) for download & decrypt...")
-            n_cmd = [
-                n_m3u8dl,
-                mpd_url,
-                "--auto-select",
-                "--save-dir", str(output_path.resolve()),
-                "--save-name", safe_name,
-                "-M", "format=mp4",
-                "--del-after-done"
-            ]
-            if ff_bin:
-                n_cmd.extend(["--ffmpeg-binary-path", ff_bin])
-            for k in clean_keys:
-                n_cmd.extend(["--key", k])
-
-            print(f"Running N_m3u8DL-RE: {' '.join(n_cmd)}")
-            proc = subprocess.run(n_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            print(f"N_m3u8DL-RE exit code: {proc.returncode}")
-
-            candidate_files = list(output_path.glob(f"{safe_name}*.mp4")) or list(output_path.glob("*.mp4"))
-            if candidate_files:
-                target_file = output_path / f"{safe_name}.mp4"
-                if not target_file.exists():
-                    target_file = candidate_files[0]
-                print(f"✅ N_m3u8DL-RE successfully completed: {target_file}")
-                return str(target_file)
-
-            print("⚠️ N_m3u8DL-RE finished but output file not found, falling back to yt-dlp + mp4decrypt...")
-
-        # -------------------------------------------------------------
-        # 2. Fallback: yt-dlp + mp4decrypt + ffmpeg
-        # -------------------------------------------------------------
-        print("🔄 Running yt-dlp + mp4decrypt + ffmpeg pipeline...")
-        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate "{mpd_url}"'
+        cmd1 = f'yt-dlp -f "bv[height<={quality}]+ba/b" -o "{output_path}/file.%(ext)s" --allow-unplayable-format --no-check-certificate --external-downloader aria2c "{mpd_url}"'
         print(f"Running command: {cmd1}")
         os.system(cmd1)
 
@@ -267,68 +204,39 @@ async def decrypt_and_merge_video(mpd_url, keys_string, output_path, output_name
         video_decrypted = False
         audio_decrypted = False
 
-        if keys_arg_str and '--key' in keys_arg_str:
-            mp4dec_bin = find_binary("mp4decrypt") or "mp4decrypt"
-            for data in avDir:
-                if data.suffix == ".mp4" and not video_decrypted:
-                    cmd2 = f'{mp4dec_bin} {keys_arg_str} --show-progress "{data}" "{output_path}/video.mp4"'
-                    print(f"Running command: {cmd2}")
-                    os.system(cmd2)
-                    if (output_path / "video.mp4").exists():
-                        video_decrypted = True
-                    data.unlink()
-                elif data.suffix == ".m4a" and not audio_decrypted:
-                    cmd3 = f'{mp4dec_bin} {keys_arg_str} --show-progress "{data}" "{output_path}/audio.m4a"'
-                    print(f"Running command: {cmd3}")
-                    os.system(cmd3)
-                    if (output_path / "audio.m4a").exists():
-                        audio_decrypted = True
-                    data.unlink()
-
-        if not video_decrypted:
-            for data in avDir:
-                if data.suffix in ['.mp4', '.mkv', '.webm', '.ts']:
-                    data.rename(output_path / "video.mp4")
+        for data in avDir:
+            if data.suffix == ".mp4" and not video_decrypted:
+                cmd2 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/video.mp4"'
+                print(f"Running command: {cmd2}")
+                os.system(cmd2)
+                if (output_path / "video.mp4").exists():
                     video_decrypted = True
-                    break
-
-        if not audio_decrypted:
-            for data in avDir:
-                if data.suffix in ['.m4a', '.mp3', '.aac', '.mka']:
-                    data.rename(output_path / "audio.m4a")
+                data.unlink()
+            elif data.suffix == ".m4a" and not audio_decrypted:
+                cmd3 = f'mp4decrypt {keys_string} --show-progress "{data}" "{output_path}/audio.m4a"'
+                print(f"Running command: {cmd3}")
+                os.system(cmd3)
+                if (output_path / "audio.m4a").exists():
                     audio_decrypted = True
-                    break
+                data.unlink()
 
-        final_path = output_path / f"{safe_name}.mp4"
-        if video_decrypted and audio_decrypted:
-            cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy -y "{final_path}"'
-            print(f"Running command: {cmd4}")
-            os.system(cmd4)
-            if (output_path / "video.mp4").exists():
-                (output_path / "video.mp4").unlink()
-            if (output_path / "audio.m4a").exists():
-                (output_path / "audio.m4a").unlink()
-        elif video_decrypted and not audio_decrypted:
-            if (output_path / "video.mp4").exists():
-                (output_path / "video.mp4").rename(final_path)
-        else:
-            for data in output_path.iterdir():
-                if data.suffix in ['.mp4', '.mkv', '.webm']:
-                    data.rename(final_path)
-                    break
+        if not video_decrypted or not audio_decrypted:
+            raise FileNotFoundError("Decryption failed: video or audio file not found.")
 
-        if not final_path.exists():
+        cmd4 = f'ffmpeg -i "{output_path}/video.mp4" -i "{output_path}/audio.m4a" -c copy -movflags +faststart "{output_path}/{output_name}.mp4"'
+        print(f"Running command: {cmd4}")
+        os.system(cmd4)
+        if (output_path / "video.mp4").exists():
+            (output_path / "video.mp4").unlink()
+        if (output_path / "audio.m4a").exists():
+            (output_path / "audio.m4a").unlink()
+
+        filename = output_path / f"{output_name}.mp4"
+
+        if not filename.exists():
             raise FileNotFoundError("Merged video file not found.")
 
-        try:
-            probe_res = subprocess.run(["ffmpeg", "-i", str(final_path)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            m_dur = re.search(r'Duration:\s*(\d+:\d+:\d+)', probe_res.stdout)
-            if m_dur:
-                print(f"Duration info: {m_dur.group(1)}")
-        except Exception as err:
-            print(f"Duration info check skipped: {err}")
-
-        return str(final_path)
+        return str(filename)
 
     except Exception as e:
         print(f"Error during decryption and merging: {str(e)}")
@@ -352,7 +260,7 @@ async def run(cmd):
         return f'[stderr]\n{stderr.decode()}'
 
 
-def old_download(url, file_name, chunk_size = 1024 * 10):
+def old_download(url, file_name, chunk_size=1024 * 10):
     if os.path.exists(file_name):
         os.remove(file_name)
     r = requests.get(url, allow_redirects=True, stream=True)
@@ -378,18 +286,10 @@ def time_name():
     return f"{date} {current_time}.mp4"
 
 
-# ============================================================
-#  🔥 FIXED: download_video with URL parameter preservation
-# ============================================================
 async def download_video(url, cmd, name):
-    # For ClassX and HLS m3u8 streams with custom headers, do not force aria2c as it may drop headers
-    if "classx" in url.lower() or ".m3u8" in url.lower() or "--concurrent-fragments" in cmd:
-        download_cmd = f'{cmd} -R 25 --fragment-retries 25'
-    else:
-        download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
-
+    download_cmd = f'{cmd} -R 25 --fragment-retries 25 --external-downloader aria2c --downloader-args "aria2c: -x 16 -j 32"'
     global failed_counter
-    print(f"⬇️ Running: {download_cmd}")
+    print(download_cmd)
     logging.info(download_cmd)
     k = subprocess.run(download_cmd, shell=True)
     if "visionias" in cmd and k.returncode != 0 and failed_counter <= 10:
@@ -409,6 +309,7 @@ async def download_video(url, cmd, name):
             return f"{name}.mp4"
         elif os.path.isfile(f"{name}.mp4.webm"):
             return f"{name}.mp4.webm"
+
         return name
     except FileNotFoundError as exc:
         return os.path.isfile.splitext[0] + "." + "mp4"
@@ -419,47 +320,43 @@ async def send_doc(bot: Client, m: Message, cc, ka, cc1, prog, count, name, chan
     time.sleep(1)
     start_time = time.time()
     await bot.send_document(ka, caption=cc1)
-    count+=1
-    await reply.delete (True)
+    count += 1
+    await reply.delete(True)
     time.sleep(1)
     os.remove(ka)
-    time.sleep(3) 
+    time.sleep(3)
 
 
-def decrypt_file(file_path, key):  
-    if not os.path.exists(file_path): 
-        return False  
+def decrypt_file(file_path, key):
+    if not os.path.exists(file_path):
+        return False
 
-    with open(file_path, "r+b") as f:  
-        num_bytes = min(28, os.path.getsize(file_path))  
-        with mmap.mmap(f.fileno(), length=num_bytes, access=mmap.ACCESS_WRITE) as mmapped_file:  
-            for i in range(num_bytes):  
-                mmapped_file[i] ^= ord(key[i]) if i < len(key) else i 
-    return True  
+    with open(file_path, "r+b") as f:
+        num_bytes = min(28, os.path.getsize(file_path))
+        with mmap.mmap(f.fileno(), length=num_bytes, access=mmap.ACCESS_WRITE) as mmapped_file:
+            for i in range(num_bytes):
+                mmapped_file[i] ^= ord(key[i]) if i < len(key) else i
+    return True
 
-async def download_and_decrypt_video(url, cmd, name, key):  
-    video_path = await download_video(url, cmd, name)  
-    
-    if video_path:  
-        decrypted = decrypt_file(video_path, key)  
-        if decrypted:  
-            print(f"File {video_path} decrypted successfully.")  
-            return video_path  
-        else:  
-            print(f"Failed to decrypt {video_path}.")  
-            return None  
 
-# ============================================================
-#  🔥 FIXED: send_vid with accurate duration & Telegram streaming
-# ============================================================
+async def download_and_decrypt_video(url, cmd, name, key):
+    video_path = await download_video(url, cmd, name)
+
+    if video_path:
+        decrypted = decrypt_file(video_path, key)
+        if decrypted:
+            print(f"File {video_path} decrypted successfully.")
+            return video_path
+        else:
+            print(f"Failed to decrypt {video_path}.")
+            return None
+
+
 async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, name, prog, channel_id):
-    info = get_video_info(filename)
-    dur = info.get("duration", 0)
-    width = info.get("width", 1280)
-    height = info.get("height", 720)
+    # 🔥 FASTSTART FIRST — Telegram inline stream ke liye zaroori
+    filename = await ensure_faststart(filename)
 
-    thumb_time = "00:00:02" if dur >= 3 else "00:00:00"
-    subprocess.run(f'ffmpeg -y -i "{filename}" -ss {thumb_time} -vframes 1 "{filename}.jpg"', shell=True)
+    subprocess.run(f'ffmpeg -i "{filename}" -ss 00:00:10 -vframes 1 "{filename}.jpg"', shell=True)
     await prog.delete(True)
     reply1 = await bot.send_message(channel_id, f"**📩 Uploading Video 📩:-**\n<blockquote>**{name}**</blockquote>")
     reply = await m.reply_text(f"**Generate Thumbnail:**\n<blockquote>**{name}**</blockquote>")
@@ -467,55 +364,29 @@ async def send_vid(bot: Client, m: Message, cc, filename, vidwatermark, thumb, n
         if thumb == "/d":
             thumbnail = f"{filename}.jpg"
         else:
-            thumbnail = thumb  
-        
+            thumbnail = thumb
+
         if vidwatermark == "/d":
             w_filename = f"{filename}"
         else:
             w_filename = f"w_{filename}"
             font_path = "vidwater.ttf"
             subprocess.run(
-                f'ffmpeg -y -i "{filename}" -vf "drawtext=fontfile={font_path}:text=\'{vidwatermark}\':fontcolor=white@0.3:fontsize=h/6:x=(w-text_w)/2:y=(h-text_h)/2" -codec:a copy "{w_filename}"',
+                f'ffmpeg -i "{filename}" -vf "drawtext=fontfile={font_path}:text=\'{vidwatermark}\':fontcolor=white@0.3:fontsize=h/6:x=(w-text_w)/2:y=(h-text_h)/2" -codec:a copy "{w_filename}"',
                 shell=True
             )
-            info = get_video_info(w_filename)
-            dur = info.get("duration", dur)
-            width = info.get("width", width)
-            height = info.get("height", height)
-            
+
     except Exception as e:
         await m.reply_text(str(e))
-        w_filename = f"{filename}"
 
+    dur = int(duration(w_filename))
     start_time = time.time()
-    thumb_to_send = thumbnail if (thumbnail and os.path.exists(thumbnail) and os.path.getsize(thumbnail) > 0) else None
 
     try:
-        await bot.send_video(
-            channel_id,
-            w_filename,
-            caption=cc,
-            supports_streaming=True,
-            height=height,
-            width=width,
-            thumb=thumb_to_send,
-            duration=dur,
-            progress=progress_bar,
-            progress_args=(reply, start_time)
-        )
-    except Exception as send_err:
-        print(f"send_video error: {send_err}, falling back to send_document")
-        await bot.send_document(channel_id, w_filename, caption=cc, progress=progress_bar, progress_args=(reply, start_time))
-
-    try:
-        if os.path.exists(w_filename):
-            os.remove(w_filename)
+        await bot.send_video(channel_id, w_filename, caption=cc, supports_streaming=True, height=720, width=1280, thumb=thumbnail, duration=dur, progress=progress_bar, progress_args=(reply, start_time))
     except Exception:
-        pass
+        await bot.send_document(channel_id, w_filename, caption=cc, progress=progress_bar, progress_args=(reply, start_time))
+    os.remove(w_filename)
     await reply.delete(True)
     await reply1.delete(True)
-    try:
-        if os.path.exists(f"{filename}.jpg"):
-            os.remove(f"{filename}.jpg")
-    except Exception:
-        pass
+    os.remove(f"{filename}.jpg")
